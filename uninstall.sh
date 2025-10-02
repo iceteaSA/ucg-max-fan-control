@@ -17,6 +17,26 @@ fi
 systemctl stop fan-control.service 2>/dev/null || true
 systemctl disable fan-control.service 2>/dev/null || true
 
+# Set PWM to zero after stopping the service
+CONFIG_FILE="/data/fan-control/config"
+DEFAULT_FAN_PWM_DEVICE="/sys/class/hwmon/hwmon0/pwm1"
+
+# Read FAN_PWM_DEVICE from config file if it exists, otherwise use default
+if [ -f "$CONFIG_FILE" ]; then
+    FAN_PWM_DEVICE=$(grep "^FAN_PWM_DEVICE=" "$CONFIG_FILE" | cut -d'=' -f2 | tr -d '"' || echo "$DEFAULT_FAN_PWM_DEVICE")
+    # If grep didn't find anything, use default
+    [ -z "$FAN_PWM_DEVICE" ] && FAN_PWM_DEVICE="$DEFAULT_FAN_PWM_DEVICE"
+else
+    FAN_PWM_DEVICE="$DEFAULT_FAN_PWM_DEVICE"
+fi
+
+if [ -w "$FAN_PWM_DEVICE" ]; then
+    echo "Setting fan PWM to 0..."
+    echo 0 > "$FAN_PWM_DEVICE" || echo "Warning: Could not set PWM to 0"
+else
+    echo "Warning: PWM device not writable or not found: $FAN_PWM_DEVICE"
+fi
+
 # Remove system files
 echo "Removing system files..."
 rm -f /etc/systemd/system/fan-control.service || echo "Warning: Could not remove service file"
