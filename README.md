@@ -1,6 +1,8 @@
-# UCG-Max/Fibre Intelligent Fan Control
+# Unifi Gateway/NVR Intelligent Fan Control
 
-Advanced temperature management for Ubiquiti UCG-Max/Fibre devices running UniFi OS 4+
+Advanced temperature management for Ubiquiti Unifi Gateway/NVR devices running UniFi OS 4+ that has a fan.
+
+Confirmed working on: UCG-Max, UCG-Fibre, UXG-Fibre, UNVR
 
 ## Features
 - 🎛️ **Four Operational States**: 
@@ -226,13 +228,11 @@ systemctl restart fan-control.service  # Apply config changes
 ## Credits & Acknowledgments
 - **Thermal Research**: [UCG-Max Thermal Thread](https://www.reddit.com/r/Ubiquiti/comments/1fr8xyt/)
 - **System Integration**: SierraSoftworks service patterns
-- **State Implementation**: fraction995
-- **Control Logic**: [Covert-Agenda](https://www.reddit.com/user/Covert-Agenda/)
 
 [☕Buy me a coffee](https://ko-fi.com/H2H719VB0U)
 
 ---
 
 **Disclaimer**: Community project - Not affiliated with Ubiquiti Inc.  
-**Compatibility**: Verified on UniFi OS 4.0.0+ (UCG-Max)  
+**Compatibility**: Verified on UniFi OS 4.0.0+ 
 **License**: MIT
