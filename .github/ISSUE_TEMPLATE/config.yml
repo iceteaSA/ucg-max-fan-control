@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/iceteaSA/ucg-max-fan-control/blob/main/README.md
+    about: Read the project documentation
+  - name: Troubleshooting Guide
+    url: https://github.com/iceteaSA/ucg-max-fan-control/blob/main/TROUBLESHOOTING.md
+    about: Check common issues and solutions
+  - name: Security Policy
+    url: https://github.com/iceteaSA/ucg-max-fan-control/blob/main/SECURITY.md
+    about: Report security vulnerabilities
