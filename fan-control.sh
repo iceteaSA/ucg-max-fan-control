@@ -22,6 +22,142 @@ DEFAULT_DEADBAND=1             # Temp stability threshold (°C)
 DEFAULT_ALPHA=20               # Smoothing factor, lower values make the smoothed temp follow raw temp more closely (0-100)
 DEFAULT_LEARNING_RATE=5        # PWM optimization step size
 
+###[ SAFE CONFIG PARSING ]#####################################################
+# Prevent code injection by parsing config files without execution
+
+# Detect malicious patterns that could lead to code execution
+is_malicious() {
+    local value="$1"
+
+    # Command substitution: $(...) or `...`
+    [[ "$value" =~ \$\( ]] && return 0
+    [[ "$value" =~ \` ]] && return 0
+
+    # Variable expansion: ${...}
+    [[ "$value" =~ \$\{ ]] && return 0
+
+    # Shell operators
+    [[ "$value" =~ [\;\|\&] ]] && return 0
+
+    # Redirects
+    [[ "$value" =~ [\<\>] ]] && return 0
+
+    # Newlines
+    [[ "$value" =~ $'\n' ]] && return 0
+
+    return 1
+}
+
+# Safely parse config file without executing code
+safe_parse_config() {
+    local config_file="$1"
+    local -n result_array="$2"
+
+    [[ ! -f "$config_file" ]] && return 2
+    [[ ! -r "$config_file" ]] && return 2
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Extract key=value
+        if [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+
+            # Remove inline comments (not in quotes)
+            if [[ ! "$value" =~ ^\" ]] && [[ "$value" =~ (.*)#.* ]]; then
+                value="${BASH_REMATCH[1]}"
+            fi
+
+            # Trim trailing whitespace
+            value="${value%"${value##*[![:space:]]}"}"
+
+            # Security check
+            if is_malicious "$value"; then
+                logger -t fan-control "SECURITY: Malicious value detected for $key: $value"
+                return 1
+            fi
+
+            result_array["$key"]="$value"
+        fi
+    done < "$config_file"
+
+    return 0
+}
+
+# Validate and assign integer parameter
+validate_and_assign_integer() {
+    local param_name="$1"
+    local raw_value="$2"
+    local min_val="$3"
+    local max_val="$4"
+    local default_val="$5"
+
+    if [[ -z "$raw_value" ]]; then
+        eval "${param_name}=${default_val}"
+        return 1
+    fi
+
+    # Remove quotes
+    raw_value="${raw_value%\"}"
+    raw_value="${raw_value#\"}"
+    raw_value="${raw_value%\'}"
+    raw_value="${raw_value#\'}"
+
+    # Validate: must be non-negative integer
+    if ! [[ "$raw_value" =~ ^[0-9]+$ ]]; then
+        logger -t fan-control "CONFIG: Invalid $param_name (not integer): $raw_value, using default: $default_val"
+        eval "${param_name}=${default_val}"
+        return 1
+    fi
+
+    # Validate: must be within range
+    if (( raw_value < min_val || raw_value > max_val )); then
+        logger -t fan-control "CONFIG: Invalid $param_name (out of range $min_val-$max_val): $raw_value, using default: $default_val"
+        eval "${param_name}=${default_val}"
+        return 1
+    fi
+
+    eval "${param_name}=${raw_value}"
+    return 0
+}
+
+# Validate and assign path parameter
+validate_and_assign_path() {
+    local param_name="$1"
+    local raw_value="$2"
+    local default_val="$3"
+
+    if [[ -z "$raw_value" ]]; then
+        eval "${param_name}=\"${default_val}\""
+        return 1
+    fi
+
+    # Remove quotes
+    raw_value="${raw_value%\"}"
+    raw_value="${raw_value#\"}"
+    raw_value="${raw_value%\'}"
+    raw_value="${raw_value#\'}"
+
+    # Security: path must not contain suspicious characters
+    if [[ "$raw_value" =~ [\;\|\&\$\`] ]]; then
+        logger -t fan-control "SECURITY: Path contains suspicious characters: $raw_value"
+        eval "${param_name}=\"${default_val}\""
+        return 1
+    fi
+
+    # Must be absolute path
+    if [[ ! "$raw_value" =~ ^/ ]]; then
+        logger -t fan-control "CONFIG: Path must be absolute: $raw_value"
+        eval "${param_name}=\"${default_val}\""
+        return 1
+    fi
+
+    eval "${param_name}=\"${raw_value}\""
+    return 0
+}
+
 # Create config file if it doesn't exist
 if [[ ! -f "$CONFIG_FILE" ]]; then
     logger -t fan-control "CONFIG: Creating new config file"
@@ -64,144 +200,75 @@ DEFAULTS
 fi
 
 
-# Source the config file
-source "$CONFIG_FILE" 2>/dev/null
-
-# Check if each required parameter is defined, and add missing ones
-missing_params=()
-missing_values=()
-missing_comments=()
-
-check_param() {
-    local param=$1
-    local default_value=$2
-    local comment=$3
-
-    if ! grep -q "^${param}=" "$CONFIG_FILE" 2>/dev/null; then
-        logger -t fan-control "CONFIG: Missing parameter detected: $param"
-        missing_params+=("$param")
-        missing_values+=("$default_value")
-        missing_comments+=("$comment")
-        # Set the value in the current environment
-        eval "${param}=${default_value}"
-    fi
-}
-
-# Check each parameter
-check_param "MIN_PWM" "$DEFAULT_MIN_PWM" "# Minimum active fan speed (0-255)"
-check_param "MAX_PWM" "$DEFAULT_MAX_PWM" "# Maximum fan speed (0-255)"
-check_param "MIN_TEMP" "$DEFAULT_MIN_TEMP" "# Base threshold (°C)"
-check_param "MAX_TEMP" "$DEFAULT_MAX_TEMP" "# Critical temperature (°C)"
-check_param "HYSTERESIS" "$DEFAULT_HYSTERESIS" "# Temperature buffer (°C)"
-check_param "CHECK_INTERVAL" "$DEFAULT_CHECK_INTERVAL" "# Base check interval (seconds)"
-check_param "TAPER_MINS" "$DEFAULT_TAPER_MINS" "# Cool-down duration (minutes)"
-check_param "FAN_PWM_DEVICE" "\"$DEFAULT_FAN_PWM_DEVICE\"" "# Fan PWM device path"
-check_param "OPTIMAL_PWM_FILE" "\"$DEFAULT_OPTIMAL_PWM_FILE\"" "# Optimal PWM file path"
-check_param "MAX_PWM_STEP" "$DEFAULT_MAX_PWM_STEP" "# Max PWM change per adjustment"
-check_param "DEADBAND" "$DEFAULT_DEADBAND" "# Temp stability threshold (°C)"
-check_param "ALPHA" "$DEFAULT_ALPHA" "# Smoothing factor (0-100)"
-check_param "LEARNING_RATE" "$DEFAULT_LEARNING_RATE" "# PWM optimization step size"
-
-# If missing parameters were found, update the config file atomically
-if [ ${#missing_params[@]} -gt 0 ]; then
-    logger -t fan-control "CONFIG: Updating configuration file with ${#missing_params[@]} missing parameters"
-
-    # Create a temporary file
-    temp_config="${CONFIG_FILE}.tmp"
-
-    # Copy existing config to temp file
-    if ! cp "$CONFIG_FILE" "$temp_config" 2>/dev/null; then
-        logger -t fan-control "ERROR: Failed to create temporary config file for update"
-        # Continue with current in-memory values, but don't update the file
+# Load config file using safe parsing (no code execution)
+declare -A config_values
+parse_result=0
+if safe_parse_config "$CONFIG_FILE" config_values; then
+    logger -t fan-control "CONFIG: Successfully parsed configuration file"
+else
+    parse_result=$?
+    if [[ $parse_result -eq 1 ]]; then
+        # Security violation detected - quarantine the file
+        logger -t fan-control "SECURITY: Malicious config detected, quarantining and using defaults"
+        quarantine_file="${CONFIG_FILE}.malicious.$(date +%s)"
+        mv "$CONFIG_FILE" "$quarantine_file" 2>/dev/null
+        logger -t fan-control "SECURITY: Malicious config moved to: $quarantine_file"
+        # Recreate clean config
+        temp_config="${CONFIG_FILE}.tmp"
+        cat > "$temp_config" <<-DEFAULTS 2>/dev/null
+MIN_PWM=$DEFAULT_MIN_PWM             # Minimum active fan speed (0-255)
+MAX_PWM=$DEFAULT_MAX_PWM            # Maximum fan speed (0-255)
+MIN_TEMP=$DEFAULT_MIN_TEMP            # Base threshold (°C)
+MAX_TEMP=$DEFAULT_MAX_TEMP            # Critical temperature (°C)
+HYSTERESIS=$DEFAULT_HYSTERESIS           # Temperature buffer (°C)
+CHECK_INTERVAL=$DEFAULT_CHECK_INTERVAL      # Base check interval (seconds)
+TAPER_MINS=$DEFAULT_TAPER_MINS          # Cool-down duration (minutes)
+FAN_PWM_DEVICE="$DEFAULT_FAN_PWM_DEVICE"
+OPTIMAL_PWM_FILE="$DEFAULT_OPTIMAL_PWM_FILE"
+MAX_PWM_STEP=$DEFAULT_MAX_PWM_STEP        # Max PWM change per adjustment
+DEADBAND=$DEFAULT_DEADBAND             # Temp stability threshold (°C)
+ALPHA=$DEFAULT_ALPHA               # Smoothing factor (0-100)
+LEARNING_RATE=$DEFAULT_LEARNING_RATE        # PWM optimization step size
+DEFAULTS
+        mv "$temp_config" "$CONFIG_FILE" 2>/dev/null
     else
-        # Add each missing parameter
-        update_failed=false
-        for i in "${!missing_params[@]}"; do
-            if ! echo "${missing_params[$i]}=${missing_values[$i]}        ${missing_comments[$i]}" >> "$temp_config" 2>/dev/null; then
-                logger -t fan-control "ERROR: Failed to add parameter ${missing_params[$i]} to config file"
-                update_failed=true
-                break
-            fi
-        done
-
-        if [ "$update_failed" = true ]; then
-            logger -t fan-control "ERROR: Config file update failed"
-            rm -f "$temp_config" 2>/dev/null  # Clean up the temporary file
-        else
-            # Replace the original file with the updated one
-            if ! mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
-                logger -t fan-control "ERROR: Failed to update config file"
-                rm -f "$temp_config" 2>/dev/null  # Clean up the temporary file
-            else
-                logger -t fan-control "CONFIG: Configuration file updated successfully"
-            fi
-        fi
+        logger -t fan-control "CONFIG: Config file error, using defaults"
     fi
 fi
 
-# Validate configuration parameters
-validate_config() {
-    local param=$1
-    local value=$2
-    local min=$3
-    local max=$4
-    local default=$5
+# Validate and assign all integer parameters
+validate_and_assign_integer "MIN_PWM" "${config_values[MIN_PWM]:-}" 0 255 "$DEFAULT_MIN_PWM"
+validate_and_assign_integer "MAX_PWM" "${config_values[MAX_PWM]:-}" 0 255 "$DEFAULT_MAX_PWM"
+validate_and_assign_integer "MIN_TEMP" "${config_values[MIN_TEMP]:-}" 30 80 "$DEFAULT_MIN_TEMP"
+validate_and_assign_integer "MAX_TEMP" "${config_values[MAX_TEMP]:-}" 40 100 "$DEFAULT_MAX_TEMP"
+validate_and_assign_integer "HYSTERESIS" "${config_values[HYSTERESIS]:-}" 1 15 "$DEFAULT_HYSTERESIS"
+validate_and_assign_integer "CHECK_INTERVAL" "${config_values[CHECK_INTERVAL]:-}" 5 60 "$DEFAULT_CHECK_INTERVAL"
+validate_and_assign_integer "TAPER_MINS" "${config_values[TAPER_MINS]:-}" 1 240 "$DEFAULT_TAPER_MINS"
+validate_and_assign_integer "MAX_PWM_STEP" "${config_values[MAX_PWM_STEP]:-}" 1 50 "$DEFAULT_MAX_PWM_STEP"
+validate_and_assign_integer "DEADBAND" "${config_values[DEADBAND]:-}" 0 10 "$DEFAULT_DEADBAND"
+validate_and_assign_integer "ALPHA" "${config_values[ALPHA]:-}" 1 99 "$DEFAULT_ALPHA"
+validate_and_assign_integer "LEARNING_RATE" "${config_values[LEARNING_RATE]:-}" 1 20 "$DEFAULT_LEARNING_RATE"
 
-    if ! [[ "$value" =~ ^[0-9]+$ ]] || (( value < min || value > max )); then
-        logger -t fan-control "CONFIG: Invalid $param value: $value (should be between $min and $max), using default: $default"
-        eval "${param}=${default}"
-        return 1
-    fi
-    return 0
-}
+# Validate and assign path parameters
+validate_and_assign_path "FAN_PWM_DEVICE" "${config_values[FAN_PWM_DEVICE]:-}" "$DEFAULT_FAN_PWM_DEVICE"
+validate_and_assign_path "OPTIMAL_PWM_FILE" "${config_values[OPTIMAL_PWM_FILE]:-}" "$DEFAULT_OPTIMAL_PWM_FILE"
 
-# Validate numeric parameters
-config_changed=false
-
-validate_config "MIN_PWM" "$MIN_PWM" 0 255 "$DEFAULT_MIN_PWM" || config_changed=true
-validate_config "MAX_PWM" "$MAX_PWM" "${MIN_PWM:-$DEFAULT_MIN_PWM}" 255 "$DEFAULT_MAX_PWM" || config_changed=true
-validate_config "MIN_TEMP" "$MIN_TEMP" 30 80 "$DEFAULT_MIN_TEMP" || config_changed=true
-validate_config "MAX_TEMP" "$MAX_TEMP" "$MIN_TEMP" 100 "$DEFAULT_MAX_TEMP" || config_changed=true
-validate_config "HYSTERESIS" "$HYSTERESIS" 1 15 "$DEFAULT_HYSTERESIS" || config_changed=true
-validate_config "CHECK_INTERVAL" "$CHECK_INTERVAL" 5 60 "$DEFAULT_CHECK_INTERVAL" || config_changed=true
-validate_config "TAPER_MINS" "$TAPER_MINS" 1 240 "$DEFAULT_TAPER_MINS" || config_changed=true
-validate_config "MAX_PWM_STEP" "$MAX_PWM_STEP" 1 50 "$DEFAULT_MAX_PWM_STEP" || config_changed=true
-validate_config "DEADBAND" "$DEADBAND" 0 10 "$DEFAULT_DEADBAND" || config_changed=true
-validate_config "ALPHA" "$ALPHA" 1 99 "$DEFAULT_ALPHA" || config_changed=true
-validate_config "LEARNING_RATE" "$LEARNING_RATE" 1 20 "$DEFAULT_LEARNING_RATE" || config_changed=true
-
-# If any config values were corrected, update the config file
-if [ "$config_changed" = true ]; then
-    logger -t fan-control "CONFIG: Updating configuration file with corrected values"
-
-    # Create a temporary file
-    temp_config="${CONFIG_FILE}.tmp"
-
-    # Write corrected values to temp file
-    if ! cat > "$temp_config" <<-CONFIG 2>/dev/null; then
-MIN_PWM=$MIN_PWM             # Minimum active fan speed (0-255)
-MAX_PWM=$MAX_PWM            # Maximum fan speed (0-255)
-MIN_TEMP=$MIN_TEMP            # Base threshold (°C)
-MAX_TEMP=$MAX_TEMP            # Critical temperature (°C)
-HYSTERESIS=$HYSTERESIS           # Temperature buffer (°C)
-CHECK_INTERVAL=$CHECK_INTERVAL      # Base check interval (seconds)
-TAPER_MINS=$TAPER_MINS          # Cool-down duration (minutes)
-FAN_PWM_DEVICE="$FAN_PWM_DEVICE"
-OPTIMAL_PWM_FILE="$OPTIMAL_PWM_FILE"
-MAX_PWM_STEP=$MAX_PWM_STEP        # Max PWM change per adjustment
-DEADBAND=$DEADBAND             # Temp stability threshold (°C)
-ALPHA=$ALPHA               # Smoothing factor (0-100)
-LEARNING_RATE=$LEARNING_RATE        # PWM optimization step size
-CONFIG
-        logger -t fan-control "ERROR: Failed to write to temporary config file"
-        # Continue with current in-memory values, but don't update the file
-    elif ! mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
-        logger -t fan-control "ERROR: Failed to update config file with corrected values"
-        rm -f "$temp_config" 2>/dev/null  # Clean up the temporary file
-    else
-        logger -t fan-control "CONFIG: Configuration file updated with corrected values"
-    fi
+# Validate parameter relationships
+config_needs_update=false
+if (( MIN_PWM > MAX_PWM )); then
+    logger -t fan-control "CONFIG: MIN_PWM > MAX_PWM, correcting"
+    MIN_PWM=$DEFAULT_MIN_PWM
+    MAX_PWM=$DEFAULT_MAX_PWM
+    config_needs_update=true
 fi
+if (( MIN_TEMP >= MAX_TEMP )); then
+    logger -t fan-control "CONFIG: MIN_TEMP >= MAX_TEMP, correcting"
+    MIN_TEMP=$DEFAULT_MIN_TEMP
+    MAX_TEMP=$DEFAULT_MAX_TEMP
+    config_needs_update=true
+fi
+
+logger -t fan-control "CONFIG: Loaded - MIN_PWM=$MIN_PWM, MAX_PWM=$MAX_PWM, MIN_TEMP=$MIN_TEMP, MAX_TEMP=$MAX_TEMP"
 
 # Derived values
 FAN_ACTIVATION_TEMP=$((MIN_TEMP + HYSTERESIS))
@@ -241,12 +308,81 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-# Create PID file with atomic lock
-(
-    flock -x 200
-    echo $$ > "$PID_FILE"
-    trap 'rm -f "$PID_FILE"; exit' EXIT INT TERM
-) 200>"$PID_FILE"
+# Create PID file with persistent lock
+# Open file descriptor 200 pointing to PID_FILE for the entire script lifetime
+exec 200>"$PID_FILE"
+
+# Acquire exclusive lock on fd 200 (non-blocking)
+# If another instance is running, this will fail immediately
+if ! flock -n -x 200; then
+    logger -t fan-control "FATAL: Another instance is already running (could not acquire lock)"
+    exit 1
+fi
+
+# Write our PID to the file (now that we hold the lock)
+echo $$ >&200
+
+# Set up cleanup trap for the main script with fan safety
+# This trap will execute when the main script exits for ANY reason
+SHUTDOWN_IN_PROGRESS=false
+cleanup_and_shutdown() {
+    # Prevent multiple executions
+    if [ "$SHUTDOWN_IN_PROGRESS" = true ]; then
+        return 0
+    fi
+    SHUTDOWN_IN_PROGRESS=true
+
+    logger -t fan-control "SHUTDOWN: Graceful shutdown initiated"
+
+    # Read final temperature and set safe fan speed
+    local final_temp=$(ubnt-systool cputemp 2>/dev/null | awk '{print int($1)}' || echo 50)
+    local safe_speed=0
+
+    # Temperature-based fan safety on shutdown
+    if (( final_temp >= MAX_TEMP )); then
+        safe_speed=$MAX_PWM
+        logger -t fan-control "SHUTDOWN: High temp ${final_temp}°C - fan at maximum (${safe_speed})"
+    elif (( final_temp >= FAN_ACTIVATION_TEMP )); then
+        # Calculate appropriate speed for current temperature
+        local temp_range=$((MAX_TEMP - FAN_ACTIVATION_TEMP))
+        local temp_diff=$((final_temp - FAN_ACTIVATION_TEMP))
+        (( temp_range > 0 )) || temp_range=1
+        safe_speed=$(( MIN_PWM + (temp_diff * temp_diff * (MAX_PWM - MIN_PWM) * 20) / (temp_range * temp_range * 10) ))
+        safe_speed=$(( safe_speed > MAX_PWM ? MAX_PWM : safe_speed ))
+        logger -t fan-control "SHUTDOWN: Temp ${final_temp}°C - fan at ${safe_speed}"
+    elif (( final_temp >= MIN_TEMP )); then
+        safe_speed=$MIN_PWM
+        logger -t fan-control "SHUTDOWN: Moderate temp ${final_temp}°C - fan at minimum (${safe_speed})"
+    else
+        safe_speed=0
+        logger -t fan-control "SHUTDOWN: Cool temp ${final_temp}°C - fan off"
+    fi
+
+    # Set safe fan speed with fallback
+    if ! echo "$safe_speed" > "$FAN_PWM_DEVICE" 2>/dev/null; then
+        # Fallback to MIN_PWM if write fails and temp is concerning
+        if (( final_temp >= MIN_TEMP )); then
+            echo "$MIN_PWM" > "$FAN_PWM_DEVICE" 2>/dev/null || true
+            logger -t fan-control "SHUTDOWN: Fallback to MIN_PWM due to write failure"
+        fi
+    fi
+
+    # Save final temperature state for next startup
+    if [[ -n "$TEMP_STATE_FILE" ]]; then
+        echo "$final_temp" > "$TEMP_STATE_FILE" 2>/dev/null || true
+    fi
+
+    # Remove the PID file
+    rm -f "$PID_FILE"
+
+    # Close and release the lock
+    exec 200>&-
+
+    logger -t fan-control "SHUTDOWN: Cleanup completed"
+}
+trap cleanup_and_shutdown EXIT INT TERM
+
+logger -t fan-control "INIT: Lock acquired successfully (PID $$)"
 
 ###[ CORE FUNCTIONALITY ]######################################################
 # State definitions
@@ -429,7 +565,6 @@ set_fan_speed() {
         else
             logger -t fan-control "SET: ${LAST_PWM}→${new_speed}pwm | Reason: ${reason}"
             LAST_PWM=$new_speed
-            LAST_AVG_TEMP=$current_temp  # Reset deadband tracking on change
         fi
 
         if (( CURRENT_STATE == STATE_ACTIVE )); then
@@ -520,9 +655,11 @@ update_fan_state() {
             state_transition="→EMERGENCY (${avg_temp}°C ≥ ${MAX_TEMP}°C)"
             CURRENT_STATE=$STATE_EMERGENCY
             set_fan_speed $MAX_PWM
+            LAST_AVG_TEMP=$avg_temp  # Update reference temp for next cycle
         else
             # Already in emergency state, ensure max fan speed
             set_fan_speed $MAX_PWM
+            LAST_AVG_TEMP=$avg_temp  # Update reference temp for next cycle
         fi
     else
         # Normal state machine when not in emergency
@@ -533,9 +670,11 @@ update_fan_state() {
                     state_transition="EMERGENCY→ACTIVE (${avg_temp}°C ≤ $((MAX_TEMP - HYSTERESIS))°C)"
                     CURRENT_STATE=$STATE_ACTIVE
                     set_fan_speed $(calculate_speed $avg_temp)
+                    LAST_AVG_TEMP=$avg_temp  # Initialize reference temp for ACTIVE state
                 else
                     # Stay in emergency mode
                     set_fan_speed $MAX_PWM
+                    LAST_AVG_TEMP=$avg_temp  # Update reference temp for next cycle
                 fi
                 ;;
 
@@ -544,6 +683,7 @@ update_fan_state() {
                     state_transition="OFF→ACTIVE (${avg_temp}°C ≥ ${FAN_ACTIVATION_TEMP}°C)"
                     CURRENT_STATE=$STATE_ACTIVE
                     set_fan_speed $OPTIMAL_PWM
+                    LAST_AVG_TEMP=$avg_temp  # Initialize reference temp for ACTIVE state
                 fi
                 ;;
 
@@ -552,14 +692,17 @@ update_fan_state() {
                     state_transition="TAPER→ACTIVE (${avg_temp}°C ≥ $((FAN_ACTIVATION_TEMP + 2))°C)"
                     CURRENT_STATE=$STATE_ACTIVE
                     set_fan_speed $OPTIMAL_PWM
+                    LAST_AVG_TEMP=$avg_temp  # Initialize reference temp for ACTIVE state
                 elif (( now - TAPER_START >= TAPER_DURATION )); then
                     state_transition="TAPER→OFF (${TAPER_MINS}min elapsed)"
                     CURRENT_STATE=$STATE_OFF
                     set_fan_speed 0
+                    LAST_AVG_TEMP=$avg_temp  # Update reference temp for next cycle
                 else
                     local remaining=$(( TAPER_DURATION - (now - TAPER_START) ))
                     logger -t fan-control "TAPER: Remaining $((remaining / 60))m | Current: ${avg_temp}°C"
                     set_fan_speed $MIN_PWM
+                    LAST_AVG_TEMP=$avg_temp  # Update reference temp for next cycle
                 fi
                 ;;
 
@@ -569,6 +712,7 @@ update_fan_state() {
                     CURRENT_STATE=$STATE_TAPER
                     TAPER_START=$now
                     set_fan_speed $MIN_PWM
+                    LAST_AVG_TEMP=$avg_temp  # Update reference temp for next cycle
                 else
                     local temp_delta=$(( avg_temp - LAST_AVG_TEMP ))
                     if (( ${temp_delta#-} > DEADBAND )); then
@@ -585,6 +729,8 @@ update_fan_state() {
                             logger -t fan-control "DEADBAND:  No change | DELTA=${temp_delta}°C"
                         fi
                     fi
+                    # Always update reference temperature for accurate deadband tracking
+                    LAST_AVG_TEMP=$avg_temp
                 fi
                 ;;
         esac
@@ -619,9 +765,11 @@ if (( initial_temp >= FAN_ACTIVATION_TEMP )); then
     logger -t fan-control "COLDSTART: Initial temp ${initial_temp}°C ≥ ${FAN_ACTIVATION_TEMP}°C"
     CURRENT_STATE=$STATE_ACTIVE
     set_fan_speed $OPTIMAL_PWM
+    LAST_AVG_TEMP=$initial_temp  # Initialize reference temp
 else
     logger -t fan-control "COLDSTART: Initial temp ${initial_temp}°C - Fans off"
     set_fan_speed 0
+    LAST_AVG_TEMP=$initial_temp  # Initialize reference temp
 fi
 
 # Define state names for more readable logging

@@ -1,1 +1,25 @@
 /.idea/
+
+# Agent analysis and remediation files
+*_ANALYSIS.md
+*_SUMMARY.md
+*_FIX*.md
+*_GUIDE.md
+*_IMPLEMENTATION.md
+*_README.md
+*_REMEDIATION*.md
+*_REFERENCE.md
+*VISUAL*.md
+*VISUAL*.txt
+DELIVERABLES_SUMMARY.md
+EXECUTIVE_SUMMARY.md
+*-patch.sh
+*-fixed.sh
+test-*.sh
+test_*.sh
+*.patch
+safe_config_parser.sh
+APPLY_SIGNAL_HANDLING_FIX.sh
+README_SIGNAL_HANDLING.md
+DEADBAND_LOGIC_FLOW.md
+SECURITY_QUICK_START.md
